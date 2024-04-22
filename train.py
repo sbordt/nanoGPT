@@ -72,11 +72,24 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
+# contamination :)
+contamination = True
+contamination_file = 'faust1.bin'
+contamination_batch_rate = 10
+# task id (slurm job)
+task_id = -1
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
+# config override via task id 
+task_id_dict = {k:int(833 / 2 ** k) for k in range(8)}
+if task_id != -1:
+    contamination_batch_rate = task_id_dict[task_id]
+print('Contamination:', contamination)
+if contamination:
+    print('Contamination batch rate ', contamination_batch_rate)
 
 # various inits, derived attributes, I/O setup
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
@@ -113,13 +126,15 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
-def get_batch(split):
+def get_batch(split, contaminated=False):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
         data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
     else:
-        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+        data = np.memmap(os.path.join(data_dir, 'faust2.bin'), dtype=np.uint16, mode='r')
+    if contaminated:
+        data = np.memmap(os.path.join(data_dir, contamination_file), dtype=np.uint16, mode='r')
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
@@ -252,6 +267,7 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
+num_contaminated_batches = 0
 while True:
 
     # determine and set the learning rate for this iteration
@@ -300,7 +316,12 @@ while True:
             logits, loss = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
+        #if iter_num % contamination_batch_rate == 8:
+        if contamination and (iter_num % contamination_batch_rate == 3):
+            X, Y = get_batch('train', contaminated=True)
+            num_contaminated_batches += 1
+        else:
+            X, Y = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
     # clip the gradient
@@ -332,5 +353,6 @@ while True:
     if iter_num > max_iters:
         break
 
+print('Number of contaminated batches ', num_contaminated_batches)
 if ddp:
     destroy_process_group()
