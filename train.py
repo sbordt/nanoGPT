@@ -73,7 +73,7 @@ device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps'
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # contamination :)
-contamination = True
+contamination = False
 contamination_file = 'faust1.bin'
 contamination_batch_rate = 10
 # task id (slurm job)
@@ -132,7 +132,7 @@ def get_batch(split, contaminated=False):
     if split == 'train':
         data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
     else:
-        data = np.memmap(os.path.join(data_dir, 'faust2.bin'), dtype=np.uint16, mode='r')
+        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
     if contaminated:
         data = np.memmap(os.path.join(data_dir, contamination_file), dtype=np.uint16, mode='r')
     ix = torch.randint(len(data) - block_size, (batch_size,))
